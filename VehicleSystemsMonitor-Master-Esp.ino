@@ -1,3 +1,4 @@
+#include <OneWire.h>
 
 // Supporting Arduino Forum Topics:
 // Waveshare e-paper displays with SPI: http://forum.arduino.cc/index.php?topic=487007.0
@@ -74,6 +75,15 @@ GxEPD_Class display(io, 16, 4); // arbitrary selection of (16), 4
 #endif
 
 
+OneWire net(D1);
+
+byte addr_DS2431[8];
+bool DS2431_ok = false;
+
+void ReadAndReportDS2431(OneWire* net, uint8_t* addr);
+void WriteRow(OneWire* net, uint8_t* addr, byte row, byte* buffer);
+void PrintBytes(uint8_t* addr, uint8_t count, bool newline=0);
+
 void setup()
 {
     Serial.begin(115200);
@@ -82,10 +92,80 @@ void setup()
 
     display.init();
 
+    while (!FindDs2431())
+    {
+        delay(2000);
+    }
+
     Serial.println("setup done");
 }
 
+bool FindDs2431()
+{
+    if (!net.search(addr_DS2431)) {
+        Serial.print("No more addresses.\n");
+        net.reset_search();
+        delay(1000);
+    }
+    else
+    {
+        if (OneWire::crc8(addr_DS2431, 7) != addr_DS2431[7]) {
+            Serial.print("CRC is not valid!\n");
+        }
+        else
+        {
+            DS2431_ok = addr_DS2431[0] == 0x2D;
+            if (DS2431_ok)
+            {
+                PrintBytes(addr_DS2431, 8);
+                Serial.print(" is a DS2431.\n");
+                ReadAndReportDS2431(&net, addr_DS2431);
+                return true;
+            }
+            else
+            {
+                PrintBytes(addr_DS2431, 8);
+                Serial.print(" is an unknown device.\n");
+            }
+        }
+    }
+    return false;
+}
+
+const GFXfont* f = &FreeMonoBold12pt7b;
+
 void loop()
+{
+
+    uint32_t freq_reading = 0;  // frequency read from one-wire slave
+    float freq_float = 0.0;
+
+    freq_reading = (uint32_t)(ReadDS2431(&net, addr_DS2431, 0));
+    freq_float = ((float)freq_reading) / 100; // cast to float and adjust fixed-point
+    Serial.print("Read: ");
+    Serial.println(freq_float);
+    Serial.print(freq_float);
+    Serial.println(" Hz");
+
+    float bus_speed = freq_float*(52.0 / 14.2);
+    String str_speed = String(bus_speed);
+    str_speed = String(str_speed + "mi/hr");
+
+
+    display.fillScreen(GxEPD_WHITE);
+    display.setTextColor(GxEPD_BLACK);
+    display.setFont(f);
+
+    display.setCursor(10, 0);
+    display.println();
+    display.println(str_speed);
+
+    display.update();
+
+    delay(5000); // delay in ms
+}
+
+void EPDTest()
 {
     showBitmapExample();
     drawCornerTest();
@@ -93,8 +173,6 @@ void loop()
     showFont("FreeMonoBold12pt7b", &FreeMonoBold12pt7b);
     showFont("FreeMonoBold18pt7b", &FreeMonoBold18pt7b);
     showFont("FreeMonoBold24pt7b", &FreeMonoBold24pt7b);
-
-    delay(10000);
 }
 
 void showBitmapExample()
@@ -146,4 +224,119 @@ void drawCornerTest()
         delay(5000);
     }
     display.setRotation(rotation); // restore
+}
+
+
+
+// EEPROM commands
+const byte WRITE_SPAD = 0x0F;
+const byte READ_SPAD = 0xAA;
+const byte COPY_SPAD = 0x55;
+const byte READ_MEMORY = 0xF0;
+
+void ReadAndReportDS2431(OneWire* net, uint8_t* addr) {
+    int i;
+    net->reset();
+    delayMicroseconds(1);
+    net->select(addr);
+    delayMicroseconds(1);
+    net->write(READ_MEMORY, 1);  // Read Memory
+    delayMicroseconds(1);
+    net->write(0x00, 1);  //Read Offset 0000h
+    delayMicroseconds(1);
+    net->write(0x00, 1);
+
+    for (i = 0; i < 24; i++) //whole mem is 144 
+    {
+        delayMicroseconds(1);
+        Serial.print(net->read(), HEX);
+        Serial.print(" ");
+    }
+    Serial.println();
+}
+
+uint32_t ReadDS2431(OneWire* net, uint8_t* addr, uint16_t wordAddr) {
+    int i;
+    net->reset();
+    delayMicroseconds(1);
+    net->select(addr);
+    delayMicroseconds(1);
+    net->write(READ_MEMORY, 1);  // Read Memory
+    delayMicroseconds(1);
+    net->write((wordAddr * 4) >> 8, 1);  //Read Offset 0000h
+    delayMicroseconds(1);
+    net->write((byte)(wordAddr * 4), 1);
+    delayMicroseconds(1);
+
+    int a = net->read(); // read occurs for succesive bytes for each call (EEPROM)
+    delayMicroseconds(1);
+    int b = net->read();
+    delayMicroseconds(1);
+    int c = net->read();
+    delayMicroseconds(1);
+    int d = net->read();
+    Serial.println(a, HEX);
+    uint32_t toReturn = 0;
+    toReturn = a | (b << 8) | (d << 16) | (c << 24); // big-endian
+    return toReturn;
+}
+
+
+void WriteReadScratchPad(OneWire* net, uint8_t* addr, byte TA1, byte TA2, byte* data)
+{
+    int i;
+    net->reset();
+    net->select(addr);
+    net->write(WRITE_SPAD, 1);  // Write ScratchPad
+    net->write(TA1, 1);
+    net->write(TA2, 1);
+    for (i = 0; i < 8; i++)
+        net->write(data[i], 1);
+
+    net->reset();
+    net->select(addr);
+    net->write(READ_SPAD);         // Read Scratchpad
+
+    for (i = 0; i < 13; i++)
+        data[i] = net->read();
+}
+
+void CopyScratchPad(OneWire* net, uint8_t* addr, byte* data)
+{
+    net->reset();
+    net->select(addr);
+    net->write(COPY_SPAD, 1);  // Copy ScratchPad
+    net->write(data[0], 1);
+    net->write(data[1], 1);  // Send TA1 TA2 and ES for copy authorization
+    net->write(data[2], 1);
+    delay(25); // Waiting for copy completion
+               //Serial.print("Copy done!\n");
+}
+
+void WriteRow(OneWire* net, uint8_t* addr, byte row, byte* buffer)
+{
+    int i;
+    if (row < 0 || row > 15) //There are 16 row of 8 bytes in the main memory
+        return;                //The remaining are for the 64 bits register page
+
+    WriteReadScratchPad(net, addr, row * 8, 0x00, buffer);
+
+    /*  Print result of the ReadScratchPad
+    for ( i = 0; i < 13; i++)
+    {
+    Serial.print(buffer[i], HEX);
+    Serial.print(" ");
+    }*/
+
+    CopyScratchPad(net, addr, buffer);
+
+}
+
+void PrintBytes(uint8_t* addr, uint8_t count, bool newline) {
+    for (uint8_t i = 0; i < count; i++) {
+        Serial.print(addr[i] >> 4, HEX);
+        Serial.print(addr[i] & 0x0f, HEX);
+    }
+    if (newline)
+        Serial.println();
 }
